@@ -1,3 +1,4 @@
+
 import 'dart:convert';
 import 'dart:io';
 import 'package:dartz/dartz.dart';
@@ -7,62 +8,79 @@ import 'package:http/http.dart' as http;
 import '../models/food_item.dart';
 
 class FoodService {
-  String get _apiKey => dotenv.env['GROK_API_KEY'] ?? '';
+  String get _apiKey => dotenv.env['GEMINI_API_KEY'] ?? '';
 
-  Future<Either<String, FoodItem>> detectFoodAndCalories(File imageFile) async {
+  Future<Either<String, FoodItem>> detectFoodAndCalories(
+    File imageFile,
+  ) async {
     try {
       if (!imageFile.existsSync()) {
-        return Left('File not found: ${imageFile.path}');
+        return Left('File not found');
+      }
+
+      if (_apiKey.isEmpty) {
+        return Left('Gemini API key is missing');
       }
 
       final imageBytes = await imageFile.readAsBytes();
       final base64Image = base64Encode(imageBytes);
 
+      final extension = imageFile.path.toLowerCase();
+      final mimeType = extension.endsWith('.png')
+          ? 'image/png'
+          : extension.endsWith('.webp')
+              ? 'image/webp'
+              : 'image/jpeg';
+
       final response = await http.post(
-        Uri.parse('https://api.groq.com/openai/v1/chat/completions'),
+        Uri.parse(
+          'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent',
+        ),
         headers: {
-          'Authorization': 'Bearer $_apiKey',
+          'x-goog-api-key': _apiKey,
           'Content-Type': 'application/json',
         },
         body: jsonEncode({
-          'model':
-              'meta-llama/llama-4-scout-17b-16e-instruct', // free vision model
-          'messages': [
+          'contents': [
             {
-              'role': 'user',
-              'content': [
+              'parts': [
                 {
-                  'type': 'image_url',
-                  'image_url': {'url': 'data:image/jpeg;base64,$base64Image'},
-                },
-                {
-                  'type': 'text',
                   'text':
-                      'Analyze this image and identify the food. '
-                      'Estimate its calories, protein, carbs, and fat. '
-                      'Return JSON only, no markdown, no explanation, in this exact format: '
-                      '{"name": "food name", "calories": 100, "protein": 10, "carbs": 20, "fat": 5}',
+                      'Analyze this food image. Estimate calories, '
+                      'protein, carbs and fat. Return JSON only with '
+                      'these fields: name, calories, protein, carbs, fat. '
+                      'Use numeric values for all nutrition fields. '
+                      'If the food is unclear, give your best estimate.'
                 },
-              ],
-            },
+                {
+                  'inline_data': {
+                    'mime_type': mimeType,
+                    'data': base64Image,
+                  }
+                }
+              ]
+            }
           ],
-          'max_tokens': 200,
+          'generationConfig': {
+            'responseMimeType': 'application/json',
+          }
         }),
       );
 
       if (response.statusCode != 200) {
-        return Left('API error: ${response.body}');
+        return Left('Gemini API error: ${response.body}');
       }
 
       final data = jsonDecode(response.body);
-      final output = data['choices'][0]['message']['content'] as String;
 
-      final match = RegExp(r'\{.*\}', dotAll: true).firstMatch(output);
-      if (match == null) {
-        return Left('No valid JSON found in response: $output');
-      }
+      final parts = data['candidates'][0]['content']['parts'];
 
-      final foodData = jsonDecode(match.group(0)!);
+      final output = parts
+          .where((part) => part['text'] != null)
+          .map((part) => part['text'] as String)
+          .join();
+
+      final foodData = jsonDecode(output);
 
       return Right(
         FoodItem(
